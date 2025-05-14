@@ -1,0 +1,656 @@
+#ifdef __APPLE__
+#include <GLUT/glut.h>
+#else
+#include <GL/glut.h>
+#endif
+
+#include <stdlib.h>
+#include <math.h>
+#include <time.h>
+#include <vector>
+#include <cstdio>
+#include <cstring>
+#include <algorithm>
+
+// Simulation states
+#define MENU 0
+#define SIMULATION 1
+#define INSTRUCTIONS 2
+int gameState = MENU;
+
+// Traffic light states
+#define RED 0
+#define YELLOW 1
+#define GREEN 2
+
+// Lane directions
+#define NORTH 0
+#define SOUTH 1
+#define EAST 2
+#define WEST 3
+
+// Vehicle types
+#define CAR 0
+#define BUS 1
+#define BIKE 2
+
+// Road parameters
+const float ROAD_WIDTH = 2.0f;
+const float INTERSECTION_SIZE = 2.0f;
+const float ROAD_LENGTH = 20.0f; // -10 to +10
+
+// Simulation parameters
+int isDay = 1;
+float timeOfDay = 0;
+float congestionLevel = 0;
+
+// Colors
+float daySky[] = {0.53f, 0.81f, 0.98f, 1.0f};
+float nightSky[] = {0.05f, 0.05f, 0.2f, 1.0f};
+float roadColor[] = {0.3f, 0.3f, 0.3f, 1.0f};
+
+void resize(int w, int h) {
+    glViewport(0, 0, w, h);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(-10.0, 10.0, -10.0, 10.0, -1.0, 1.0); // Set up a 2D orthogonal projection matrix
+    glMatrixMode(GL_MODELVIEW);
+}
+
+// Traffic light structure
+struct TrafficLight {
+    int state;
+    float timer;
+    int lane;
+};
+
+// Vehicle structure
+struct Vehicle {
+    float x, y;
+    float speed;
+    int type;
+    int lane;
+    bool stopped;
+};
+
+std::vector<TrafficLight> lights(4);
+std::vector<Vehicle> vehicles;
+int vehicleCount = 0;
+
+void initSimulation() {
+    // Initialize traffic lights
+    for (int i = 0; i < 4; i++) {
+        lights[i].state = RED;
+        lights[i].timer = 0;
+        lights[i].lane = i;
+    }
+    lights[NORTH].state = GREEN;
+
+    // Clear vehicles
+    vehicles.clear();
+    vehicleCount = 0;
+    congestionLevel = 0;
+}
+
+void drawRoad() {
+    // Main road surface
+    glColor3fv(roadColor);
+    glBegin(GL_QUADS);
+        // Horizontal road
+        glVertex2f(-ROAD_LENGTH/2, -ROAD_WIDTH);
+        glVertex2f(ROAD_LENGTH/2, -ROAD_WIDTH);
+        glVertex2f(ROAD_LENGTH/2, ROAD_WIDTH);
+        glVertex2f(-ROAD_LENGTH/2, ROAD_WIDTH);
+
+        // Vertical road
+        glVertex2f(-ROAD_WIDTH, -ROAD_LENGTH/2);
+        glVertex2f(ROAD_WIDTH, -ROAD_LENGTH/2);
+        glVertex2f(ROAD_WIDTH, ROAD_LENGTH/2);
+        glVertex2f(-ROAD_WIDTH, ROAD_LENGTH/2);
+    glEnd();
+
+    // Road borders (white lines, excluding intersection)
+    glColor3f(1, 1, 1);
+    glLineWidth(3.0);
+
+    // Horizontal borders
+    glBegin(GL_LINES);
+        // Top border segments
+        glVertex2f(-ROAD_LENGTH/2, ROAD_WIDTH);
+        glVertex2f(-INTERSECTION_SIZE/2, ROAD_WIDTH);
+        glVertex2f(INTERSECTION_SIZE/2, ROAD_WIDTH);
+        glVertex2f(ROAD_LENGTH/2, ROAD_WIDTH);
+
+        // Bottom border segments
+        glVertex2f(-ROAD_LENGTH/2, -ROAD_WIDTH);
+        glVertex2f(-INTERSECTION_SIZE/2, -ROAD_WIDTH);
+        glVertex2f(INTERSECTION_SIZE/2, -ROAD_WIDTH);
+        glVertex2f(ROAD_LENGTH/2, -ROAD_WIDTH);
+    glEnd();
+
+    // Vertical borders
+    glBegin(GL_LINES);
+        // Right border segments
+        glVertex2f(ROAD_WIDTH, -ROAD_LENGTH/2);
+        glVertex2f(ROAD_WIDTH, -INTERSECTION_SIZE/2);
+        glVertex2f(ROAD_WIDTH, INTERSECTION_SIZE/2);
+        glVertex2f(ROAD_WIDTH, ROAD_LENGTH/2);
+
+        // Left border segments
+        glVertex2f(-ROAD_WIDTH, -ROAD_LENGTH/2);
+        glVertex2f(-ROAD_WIDTH, -INTERSECTION_SIZE/2);
+        glVertex2f(-ROAD_WIDTH, INTERSECTION_SIZE/2);
+        glVertex2f(-ROAD_WIDTH, ROAD_LENGTH/2);
+    glEnd();
+
+    // Road dividers (dashed lines)
+    glColor3f(1, 1, 1);
+    glLineWidth(1.5);
+    float dashLength = 0.5f;
+    float gapLength = 0.3f;
+
+    // Horizontal divider (left side)
+    for(float x = -ROAD_LENGTH/2; x < -INTERSECTION_SIZE/2; x += dashLength + gapLength) {
+        glBegin(GL_LINES);
+            glVertex2f(x, 0);
+            glVertex2f(x + dashLength, 0);
+        glEnd();
+    }
+    // Horizontal divider (right side)
+    for(float x = INTERSECTION_SIZE/2; x < ROAD_LENGTH/2; x += dashLength + gapLength) {
+        glBegin(GL_LINES);
+            glVertex2f(x, 0);
+            glVertex2f(x + dashLength, 0);
+        glEnd();
+    }
+
+    // Vertical divider (bottom side)
+    for(float y = -ROAD_LENGTH/2; y < -INTERSECTION_SIZE/2; y += dashLength + gapLength) {
+        glBegin(GL_LINES);
+            glVertex2f(0, y);
+            glVertex2f(0, y + dashLength);
+        glEnd();
+    }
+    // Vertical divider (top side)
+    for(float y = INTERSECTION_SIZE/2; y < ROAD_LENGTH/2; y += dashLength + gapLength) {
+        glBegin(GL_LINES);
+            glVertex2f(0, y);
+            glVertex2f(0, y + dashLength);
+        glEnd();
+    }
+}
+void drawTrafficLight(float x, float y, int state) {
+    // Light pole
+    glColor3f(0.3f, 0.3f, 0.3f);
+    glBegin(GL_QUADS);
+        glVertex2f(x-0.05f, y);
+        glVertex2f(x+0.05f, y);
+        glVertex2f(x+0.05f, y+0.8f);
+        glVertex2f(x-0.05f, y+0.8f);
+    glEnd();
+
+    // Light box
+    glColor3f(0.1f, 0.1f, 0.1f);
+    glBegin(GL_QUADS);
+        glVertex2f(x-0.2f, y+0.8f);
+        glVertex2f(x+0.2f, y+0.8f);
+        glVertex2f(x+0.2f, y+1.3f);
+        glVertex2f(x-0.2f, y+1.3f);
+    glEnd();
+
+    // Lights
+    float lightRadius = 0.15f;
+
+    // Red light
+    glColor3f(state == RED ? 1.0f : 0.3f, 0, 0);
+    glBegin(GL_TRIANGLE_FAN);
+        glVertex2f(x, y+1.2f);
+        for(int i = 0; i <= 360; i += 30)
+            glVertex2f(x+lightRadius*cos(i*3.14159f/180), y+1.2f+lightRadius*sin(i*3.14159f/180));
+    glEnd();
+
+    // Yellow light
+    glColor3f(state == YELLOW ? 1.0f : 0.3f, state == YELLOW ? 1.0f : 0.3f, 0);
+    glBegin(GL_TRIANGLE_FAN);
+        glVertex2f(x, y+1.05f);
+        for(int i = 0; i <= 360; i += 30)
+            glVertex2f(x+lightRadius*cos(i*3.14159f/180), y+1.05f+lightRadius*sin(i*3.14159f/180));
+    glEnd();
+
+    // Green light
+    glColor3f(0, state == GREEN ? 1.0f : 0.3f, 0);
+    glBegin(GL_TRIANGLE_FAN);
+        glVertex2f(x, y+0.9f);
+        for(int i = 0; i <= 360; i += 30)
+            glVertex2f(x+lightRadius*cos(i*3.14159f/180), y+0.9f+lightRadius*sin(i*3.14159f/180));
+    glEnd();
+}
+
+void drawTrafficLights() {
+    // North light (facing south)
+    glPushMatrix();
+    glTranslatef(0, 3.0f, 0);
+    glRotatef(180, 0, 0, 1);
+    drawTrafficLight(0, 0, lights[NORTH].state);
+    glPopMatrix();
+
+    // South light (facing north)
+    glPushMatrix();
+    glTranslatef(0, -3.0f, 0);
+    drawTrafficLight(0, 0, lights[SOUTH].state);
+    glPopMatrix();
+
+    // East light (facing west)
+    glPushMatrix();
+    glTranslatef(3.0f, 0, 0);
+    glRotatef(90, 0, 0, 1);
+    drawTrafficLight(0, 0, lights[EAST].state);
+    glPopMatrix();
+
+    // West light (facing east)
+    glPushMatrix();
+    glTranslatef(-3.0f, 0, 0);
+    glRotatef(-90, 0, 0, 1);
+    drawTrafficLight(0, 0, lights[WEST].state);
+    glPopMatrix();
+}
+
+void drawVehicle(float x, float y, int type) {
+    float width, height;
+
+    switch(type) {
+        case CAR:
+            width = 0.6f;
+            height = 1.0f;
+            glColor3f(0.9f, 0.2f, 0.2f); // Red
+            break;
+        case BUS:
+            width = 0.8f;
+            height = 1.5f;
+            glColor3f(0.2f, 0.2f, 0.9f); // Blue
+            break;
+        case BIKE:
+            width = 0.4f;
+            height = 0.8f;
+            glColor3f(0.9f, 0.9f, 0.2f); // Yellow
+            break;
+    }
+
+    glPushMatrix();
+    glTranslatef(x, y, 0);
+    glBegin(GL_QUADS);
+        glVertex2f(-width/2, -height/2);
+        glVertex2f(width/2, -height/2);
+        glVertex2f(width/2, height/2);
+        glVertex2f(-width/2, height/2);
+    glEnd();
+
+    // Windows for cars and buses
+    if (type != BIKE) {
+        glColor3f(0.7f, 0.9f, 1.0f);
+        glBegin(GL_QUADS);
+            glVertex2f(-width/3, -height/4);
+            glVertex2f(width/3, -height/4);
+            glVertex2f(width/3, height/4);
+            glVertex2f(-width/3, height/4);
+        glEnd();
+    }
+    glPopMatrix();
+}
+
+void drawVehicles() {
+    for (const auto& vehicle : vehicles) {
+        drawVehicle(vehicle.x, vehicle.y, vehicle.type);
+    }
+}
+
+void spawnVehicle() {
+    if (vehicleCount >= 20) return;
+
+    Vehicle v;
+    v.type = rand() % 3;
+    v.lane = rand() % 4;
+    v.stopped = false;
+
+    switch(v.lane) {
+        case NORTH:
+            v.x = (rand() % 100)/100.0f * 3.0f - 1.5f;
+            v.y = ROAD_LENGTH/2;
+            v.speed = -0.03f - (rand() % 10)/1000.0f;
+            break;
+        case SOUTH:
+            v.x = (rand() % 100)/100.0f * 3.0f - 1.5f;
+            v.y = -ROAD_LENGTH/2;
+            v.speed = 0.03f + (rand() % 10)/1000.0f;
+            break;
+        case EAST:
+            v.x = ROAD_LENGTH/2;
+            v.y = (rand() % 100)/100.0f * 3.0f - 1.5f;
+            v.speed = -0.03f - (rand() % 10)/1000.0f;
+            break;
+        case WEST:
+            v.x = -ROAD_LENGTH/2;
+            v.y = (rand() % 100)/100.0f * 3.0f - 1.5f;
+            v.speed = 0.03f + (rand() % 10)/1000.0f;
+            break;
+    }
+
+    if (v.type == BUS) v.speed *= 0.7f;
+    vehicles.push_back(v);
+    vehicleCount++;
+}
+
+void updateVehicles() {
+    for (auto& v : vehicles) {
+        // Check if vehicle should stop at red light
+        if (abs(v.x) < INTERSECTION_SIZE/2 && abs(v.y) < INTERSECTION_SIZE/2) {
+            if (lights[v.lane].state != GREEN) {
+                v.stopped = true;
+                continue;
+            }
+            v.stopped = false;
+        }
+
+        if (!v.stopped) {
+            switch(v.lane) {
+                case NORTH: v.y += v.speed; break;
+                case SOUTH: v.y += v.speed; break;
+                case EAST: v.x += v.speed; break;
+                case WEST: v.x += v.speed; break;
+            }
+        }
+    }
+
+    // Remove vehicles that are off-screen
+    vehicles.erase(
+        std::remove_if(vehicles.begin(), vehicles.end(),
+            [](const Vehicle& v) {
+                return v.x < -ROAD_LENGTH/2 || v.x > ROAD_LENGTH/2 ||
+                       v.y < -ROAD_LENGTH/2 || v.y > ROAD_LENGTH/2;
+            }),
+        vehicles.end());
+    vehicleCount = vehicles.size();
+    congestionLevel = vehicleCount / 20.0f;
+}
+
+void updateTrafficLights() {
+    static float lightTimer = 0;
+    lightTimer += 0.016f; // ~60fps
+
+    if (lightTimer > 10.0f) { // Change lights every 10 seconds
+        lightTimer = 0;
+        for (auto& light : lights) {
+            if (light.state == GREEN) {
+                light.state = YELLOW;
+            } else if (light.state == YELLOW) {
+                light.state = RED;
+                // Cycle to next light
+                light.lane = (light.lane + 1) % 4;
+                lights[light.lane].state = GREEN;
+                break;
+            }
+        }
+    }
+}
+
+void updateSimulation(int value) {
+    // Random vehicle spawning
+    if (rand() % 100 < 3 && vehicleCount < 20) {
+        spawnVehicle();
+    }
+
+    updateTrafficLights();
+    updateVehicles();
+
+    // Update day/night cycle
+    timeOfDay += 0.001f;
+    if (timeOfDay >= 24.0f) timeOfDay = 0;
+    isDay = (timeOfDay > 6.0f && timeOfDay < 18.0f);
+
+    glutPostRedisplay();
+    glutTimerFunc(16, updateSimulation, 0);
+}
+
+void drawMenu() {
+    // Title
+    glColor3f(0.2f, 0.2f, 0.8f);
+    glRasterPos2f(-3.0f, 5.0f);
+    const char* title = "Traffic Control Simulation";
+    for (const char* c = title; *c != '\0'; c++) {
+        glutBitmapCharacter(GLUT_BITMAP_TIMES_ROMAN_24, *c);
+    }
+
+    // Buttons
+    glColor3f(0.7f, 0.7f, 0.9f);
+    glBegin(GL_QUADS);
+        // Start button
+        glVertex2f(-3.0f, 1.0f);
+        glVertex2f(3.0f, 1.0f);
+        glVertex2f(3.0f, 2.0f);
+        glVertex2f(-3.0f, 2.0f);
+
+        // Instructions button
+        glVertex2f(-3.0f, -1.0f);
+        glVertex2f(3.0f, -1.0f);
+        glVertex2f(3.0f, 0.0f);
+        glVertex2f(-3.0f, 0.0f);
+
+        // Exit button
+        glVertex2f(-3.0f, -3.0f);
+        glVertex2f(3.0f, -3.0f);
+        glVertex2f(3.0f, -2.0f);
+        glVertex2f(-3.0f, -2.0f);
+    glEnd();
+
+    // Button borders
+    glColor3f(0.3f, 0.3f, 0.5f);
+    glLineWidth(2.0f);
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(-3.0f, 1.0f);
+        glVertex2f(3.0f, 1.0f);
+        glVertex2f(3.0f, 2.0f);
+        glVertex2f(-3.0f, 2.0f);
+    glEnd();
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(-3.0f, -1.0f);
+        glVertex2f(3.0f, -1.0f);
+        glVertex2f(3.0f, 0.0f);
+        glVertex2f(-3.0f, 0.0f);
+    glEnd();
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(-3.0f, -3.0f);
+        glVertex2f(3.0f, -3.0f);
+        glVertex2f(3.0f, -2.0f);
+        glVertex2f(-3.0f, -2.0f);
+    glEnd();
+
+    // Button text
+    glColor3f(0.0f, 0.0f, 0.0f);
+    glRasterPos2f(-1.5f, 1.5f);
+    const char* startText = "Start Simulation";
+    for (const char* c = startText; *c != '\0'; c++) {
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, *c);
+    }
+
+    glRasterPos2f(-1.8f, -0.5f);
+    const char* instText = "Instructions";
+    for (const char* c = instText; *c != '\0'; c++) {
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, *c);
+    }
+
+    glRasterPos2f(-0.8f, -2.5f);
+    const char* exitText = "Exit";
+    for (const char* c = exitText; *c != '\0'; c++) {
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, *c);
+    }
+}
+
+void drawInstructions() {
+    glColor3f(0.2f, 0.2f, 0.8f);
+    glRasterPos2f(-2.0f, 8.0f);
+    const char* title = "Instructions";
+    for (const char* c = title; *c != '\0'; c++) {
+        glutBitmapCharacter(GLUT_BITMAP_TIMES_ROMAN_24, *c);
+    }
+
+    glColor3f(0.0f, 0.0f, 0.0f);
+    const char* instructions[] = {
+        "Control traffic lights to manage vehicle flow:",
+        "1 - North light green",
+        "2 - East light green",
+        "3 - South light green",
+        "4 - West light green",
+        "D - Toggle day/night mode",
+        "ESC - Return to menu"
+    };
+
+    for (int i = 0; i < 7; i++) {
+        glRasterPos2f(-8.0f, 6.0f - i*0.8f);
+        for (const char* c = instructions[i]; *c != '\0'; c++) {
+            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, *c);
+        }
+    }
+
+    // Back button
+    glColor3f(0.7f, 0.7f, 0.9f);
+    glBegin(GL_QUADS);
+        glVertex2f(-3.0f, -8.0f);
+        glVertex2f(3.0f, -8.0f);
+        glVertex2f(3.0f, -7.0f);
+        glVertex2f(-3.0f, -7.0f);
+    glEnd();
+
+    glColor3f(0.3f, 0.3f, 0.5f);
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(-3.0f, -8.0f);
+        glVertex2f(3.0f, -8.0f);
+        glVertex2f(3.0f, -7.0f);
+        glVertex2f(-3.0f, -7.0f);
+    glEnd();
+
+    glColor3f(0.0f, 0.0f, 0.0f);
+    glRasterPos2f(-1.0f, -7.5f);
+    const char* backText = "Back";
+    for (const char* c = backText; *c != '\0'; c++) {
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, *c);
+    }
+}
+
+static void display() {
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // Set background color
+    if (isDay) {
+        glClearColor(daySky[0], daySky[1], daySky[2], daySky[3]);
+    } else {
+        glClearColor(nightSky[0], nightSky[1], nightSky[2], nightSky[3]);
+    }
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    switch(gameState) {
+        case MENU:
+            drawMenu();
+            break;
+        case INSTRUCTIONS:
+            drawInstructions();
+            break;
+        case SIMULATION:
+            drawRoad();
+            drawTrafficLights();
+            drawVehicles();
+            break;
+    }
+
+    glutSwapBuffers();
+}
+
+static void key(unsigned char key, int x, int y) {
+    switch(key) {
+        case 27: // ESC
+            if (gameState == SIMULATION) {
+                gameState = MENU;
+            } else {
+                exit(0);
+            }
+            break;
+        case '1':
+            if (gameState == SIMULATION) {
+                for (auto& light : lights) light.state = RED;
+                lights[NORTH].state = GREEN;
+            }
+            break;
+        case '2':
+            if (gameState == SIMULATION) {
+                for (auto& light : lights) light.state = RED;
+                lights[EAST].state = GREEN;
+            }
+            break;
+        case '3':
+            if (gameState == SIMULATION) {
+                for (auto& light : lights) light.state = RED;
+                lights[SOUTH].state = GREEN;
+            }
+            break;
+        case '4':
+            if (gameState == SIMULATION) {
+                for (auto& light : lights) light.state = RED;
+                lights[WEST].state = GREEN;
+            }
+            break;
+        case 'd':
+        case 'D':
+            isDay = !isDay;
+            break;
+    }
+    glutPostRedisplay();
+}
+
+void mouse(int button, int state, int x, int y) {
+    if (button == GLUT_LEFT_BUTTON && state == GLUT_DOWN) {
+        float mx = (x / (float)glutGet(GLUT_WINDOW_WIDTH)) * 20 - 10;
+        float my = 10 - (y / (float)glutGet(GLUT_WINDOW_HEIGHT)) * 20;
+
+        if (gameState == MENU) {
+            // Start button
+            if (mx >= -3 && mx <= 3 && my >= 1 && my <= 2) {
+                gameState = SIMULATION;
+                initSimulation();
+                glutTimerFunc(16, updateSimulation, 0);
+            }
+            // Instructions button
+            else if (mx >= -3 && mx <= 3 && my >= -1 && my <= 0) {
+                gameState = INSTRUCTIONS;
+            }
+            // Exit button
+            else if (mx >= -3 && mx <= 3 && my >= -3 && my <= -2) {
+                exit(0);
+            }
+        }
+        else if (gameState == INSTRUCTIONS) {
+            // Back button
+            if (mx >= -3 && mx <= 3 && my >= -8 && my <= -7) {
+                gameState = MENU;
+            }
+        }
+    }
+    glutPostRedisplay();
+}
+
+int main(int argc, char *argv[]) {
+    glutInit(&argc, argv);
+    glutInitWindowSize(800, 800);
+    glutInitWindowPosition(100, 100);
+    glutInitDisplayMode(GLUT_RGB | GLUT_DOUBLE);
+
+    glutCreateWindow("Traffic Simulation");
+    glutReshapeFunc(resize);
+    glutDisplayFunc(display);
+    glutKeyboardFunc(key);
+    glutMouseFunc(mouse);
+
+    srand(time(NULL));
+
+    glutMainLoop();
+    return 0;
+}
+
